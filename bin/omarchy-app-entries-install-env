@@ -1,0 +1,63 @@
+#!/bin/bash
+
+# Persist the Flatpak export dirs in the Hyprland session environment so the app
+# launcher, GTK icon lookup, and xdg-open still see Flatpak apps after a logout.
+#
+# Writes ~/.config/hypr/envs.lua and makes ~/.config/hypr/hyprland.lua require it.
+# Both are user config; the hyprland.lua edit is backed up first and is a no-op
+# when the require line is already there.
+
+set -euo pipefail
+
+HYPR_DIR="$HOME/.config/hypr"
+ENVS_FILE="$HYPR_DIR/envs.lua"
+MAIN_FILE="$HYPR_DIR/hyprland.lua"
+REQUIRE_LINE='require("hypr.envs")'
+
+mkdir -p "$HYPR_DIR"
+
+if [[ -f $ENVS_FILE ]] && ! grep -q "omarchy-app-entries-install-env" "$ENVS_FILE"; then
+  cp -a "$ENVS_FILE" "$ENVS_FILE.bak.$(date +%Y%m%d-%H%M%S)"
+fi
+
+cat >"$ENVS_FILE" <<'LUA'
+-- Written by omarchy-app-entries-install-env.
+--
+-- Omarchy's session ships XDG_DATA_DIRS=/usr/local/share:/usr/share, which
+-- leaves Flatpak's exported .desktop files and icons invisible to the app
+-- search selector. Append the Flatpak export roots, computed at config-parse
+-- time so a different login environment is preserved rather than overwritten.
+
+local home = os.getenv("HOME") or ""
+local value = os.getenv("XDG_DATA_DIRS")
+
+if value == nil or value == "" then
+  value = "/usr/local/share:/usr/share"
+end
+
+local roots = {
+  "/var/lib/flatpak/exports/share",
+  home .. "/.local/share/flatpak/exports/share",
+}
+
+for _, root in ipairs(roots) do
+  if not (":" .. value .. ":"):find(":" .. root .. ":", 1, true) then
+    value = value .. ":" .. root
+  end
+end
+
+hl.env("XDG_DATA_DIRS", value)
+LUA
+
+if ! grep -qF "$REQUIRE_LINE" "$MAIN_FILE"; then
+  cp -a "$MAIN_FILE" "$MAIN_FILE.bak.$(date +%Y%m%d-%H%M%S)"
+  cat >>"$MAIN_FILE" <<EOF
+
+-- Flatpak/AppImage app support: keep exported .desktop files and icons on
+-- XDG_DATA_DIRS so they appear in the app launcher.
+$REQUIRE_LINE
+EOF
+  echo "Wired $REQUIRE_LINE into $MAIN_FILE"
+fi
+
+echo "Session environment persisted in $ENVS_FILE"

@@ -1,0 +1,16 @@
+{
+  // Flatpak and AppImage application support.
+  // Each installer registers the app's .desktop entry with the app search
+  // selector when it finishes (omarchy-app-entries-refresh).
+  "install.flatpak": {"icon":"󰣇","label":"Flatpak","aliases":["flatpak","flathub"]},
+  "install.flatpak.enable": {"icon":"󰉉","label":"Enable Flatpak","description":"Install Flatpak, Flathub, and the launcher wiring","when":"! omarchy-cmd-present flatpak","action":"omarchy-launch-floating-terminal-with-presentation omarchy-install-flatpak"},
+  "install.flatpak.app": {"icon":"󰉉","label":"Flathub App","description":"Search Flathub and install an app","action":"omarchy-launch-floating-terminal-with-presentation omarchy-install-flatpak-app"},
+  "install.appimage": {"icon":"󰏓","label":"AppImage","aliases":["appimage"]},
+  "install.appimage.enable": {"icon":"󰉉","label":"Enable AppImage","description":"Install the FUSE 2 runtime AppImages need","when":"! omarchy-pkg-present fuse2","action":"omarchy-launch-floating-terminal-with-presentation 'omarchy-pkg-add fuse2'"},
+  "install.appimage.file": {"icon":"󰉉","label":"AppImage File","description":"Install an .AppImage and add it to the app launcher","action":"omarchy-launch-floating-terminal-with-presentation omarchy-install-appimage"},
+  "install.appimage.github": {"icon":"󰉉","label":"From GitHub Repo","description":"Download the latest release asset and watch the repo for updates","action":"omarchy-launch-floating-terminal-with-presentation omarchy-install-appimage-github"},
+  "install.appimage.watch": {"icon":"","label":"Auto-Update","description":"Daily check for new releases of tracked AppImages","checked":"systemctl --user is-enabled omarchy-appimage-update.timer","action":"omarchy-launch-floating-terminal-with-presentation 'if systemctl --user is-enabled omarchy-appimage-update.timer &>/dev/null; then omarchy-appimage-watch disable; else omarchy-appimage-watch enable; fi'"},
+  "update.appimage": {"icon":"󰏓","label":"AppImages","when":"grep -q X-AppImage-Repo $HOME/.local/share/applications/appimage-*.desktop 2>/dev/null","action":"omarchy-launch-floating-terminal-with-presentation omarchy-update-appimages"},
+  "remove.flatpak": {"icon":"󰣇","label":"Flatpak App","when":"omarchy-cmd-present flatpak && [[ -n $(flatpak list --app --columns=application 2>/dev/null) ]]","action":"omarchy-launch-floating-terminal-with-presentation omarchy-remove-flatpak-app"},
+  "remove.appimage": {"icon":"󰏓","label":"AppImage","when":"compgen -G \"$HOME/.local/share/applications/appimage-*.desktop\"","action":"omarchy-launch-floating-terminal-with-presentation omarchy-remove-appimage"},
+}

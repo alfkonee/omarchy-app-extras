@@ -1,0 +1,12 @@
+#!/bin/bash
+# Keep Flatpak apps and GitHub-tracked AppImages current with the rest of the
+# system, then re-register their launchers with the app search selector.
+
+if command -v flatpak &>/dev/null; then
+  flatpak update -y --noninteractive || true
+  flatpak uninstall --unused -y --noninteractive || true
+fi
+
+omarchy-update-appimages --quiet || true
+
+omarchy-app-entries-refresh --no-restart --quiet

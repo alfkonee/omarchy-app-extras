@@ -1,0 +1,5 @@
+#!/bin/bash
+# Refresh the desktop/icon caches at login and prune launchers whose AppImage
+# is gone, so the app search selector never lists a dead entry.
+
+omarchy-app-entries-refresh --no-restart --quiet

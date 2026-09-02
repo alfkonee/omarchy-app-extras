@@ -1,0 +1,144 @@
+#!/bin/bash
+
+# Check every AppImage installed from a GitHub release for a newer release and
+# reinstall the ones that moved. Run by hand, by the daily watch timer, and by
+# the post-update hook.
+#
+# Usage: omarchy-update-appimages [--check] [--notify] [--quiet]
+#   --check    report what would update, install nothing
+#   --notify   send a desktop notification when something updated
+#   --quiet    only print when there is news
+
+set -uo pipefail
+
+source "$HOME/.local/lib/omarchy/appimage.sh"
+
+CHECK_ONLY=0
+NOTIFY=0
+QUIET=0
+
+for arg in "$@"; do
+  case $arg in
+  --check) CHECK_ONLY=1 ;;
+  --notify) NOTIFY=1 ;;
+  --quiet) QUIET=1 ;;
+  -h | --help)
+    sed -n '3,11p' "$0" | sed 's/^# \?//'
+    exit 0
+    ;;
+  esac
+done
+
+command -v jq &>/dev/null || { echo "jq is required." >&2; exit 1; }
+
+DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+DESKTOP_DIR="$DATA_HOME/applications"
+
+say() { ((QUIET)) || echo -e "$@"; }
+news() { echo -e "$@"; }
+
+shopt -s nullglob
+ENTRIES=("$DESKTOP_DIR"/appimage-*.desktop)
+shopt -u nullglob
+
+TRACKED=0
+UPDATED=()
+FAILED=()
+
+for entry in "${ENTRIES[@]}"; do
+  repo=$(sed -n 's/^X-AppImage-Repo=//p' "$entry" | head -n1)
+  [[ -n $repo ]] || continue
+  ((TRACKED++))
+
+  name=$(sed -n 's/^Name=//p' "$entry" | head -n1)
+  have_tag=$(sed -n 's/^X-AppImage-Release=//p' "$entry" | head -n1)
+  have_published=$(sed -n 's/^X-AppImage-Published=//p' "$entry" | head -n1)
+  asset_name=$(sed -n 's/^X-AppImage-Asset=//p' "$entry" | head -n1)
+  asset_pattern=$(sed -n 's/^X-AppImage-Asset-Glob=//p' "$entry" | head -n1)
+  [[ -n $asset_pattern ]] || asset_pattern=$asset_name
+
+  say "Checking $name ($repo)..."
+  release=$(latest_release_json "$repo")
+
+  if [[ -z $release ]]; then
+    FAILED+=("$name: could not reach GitHub")
+    continue
+  fi
+
+  tag=$(jq -r '.tag_name // empty' <<<"$release")
+  published=$(jq -r '.published_at // empty' <<<"$release")
+
+  # Tag comparison catches versioned releases; publish time catches rolling tags
+  # such as "continuous" or "nightly", where the tag never changes.
+  if [[ $tag == "$have_tag" && $published == "$have_published" ]]; then
+    say "  up to date ($tag)"
+    continue
+  fi
+
+  mapfile -t assets < <(release_appimage_assets <<<"$release")
+  ((${#assets[@]})) || { FAILED+=("$name: release $tag has no AppImage asset"); continue; }
+
+  selected=""
+  for row in "${assets[@]}"; do
+    candidate=${row%%$'\t'*}
+    # shellcheck disable=SC2053 -- pattern match is the point
+    if [[ $candidate == "$asset_name" || $candidate == $asset_pattern ]]; then
+      selected=$row
+      break
+    fi
+  done
+  # A project that renamed its asset still gets updated when there is only one.
+  [[ -z $selected && ${#assets[@]} -eq 1 ]] && selected=${assets[0]}
+
+  if [[ -z $selected ]]; then
+    FAILED+=("$name: no asset in $tag matches $asset_pattern")
+    continue
+  fi
+
+  new_asset=${selected%%$'\t'*}
+  new_url=${selected#*$'\t'}
+
+  if ((CHECK_ONLY)); then
+    news "$name: $have_tag -> $tag ($new_asset)"
+    UPDATED+=("$name $tag")
+    continue
+  fi
+
+  news "Updating $name: $have_tag -> $tag"
+  work=$(mktemp -d)
+  if ! download_asset "$new_url" "$work/$new_asset"; then
+    rm -rf "$work"
+    FAILED+=("$name: download failed")
+    continue
+  fi
+
+  if omarchy-install-appimage "$work/$new_asset" --keep-source --quiet \
+    --repo "$repo" --release "$tag" --asset "$new_asset" \
+    --asset-glob "$(asset_glob "$new_asset")" --published "$published"; then
+    UPDATED+=("$name $tag")
+  else
+    FAILED+=("$name: install failed")
+  fi
+  rm -rf "$work"
+done
+
+if ((TRACKED == 0)); then
+  say "No AppImages are tracked from GitHub releases."
+  exit 0
+fi
+
+if ((${#UPDATED[@]})); then
+  news "\n\e[32mUpdated:\e[0m ${UPDATED[*]}"
+  if ((NOTIFY)) && ((CHECK_ONLY == 0)); then
+    notify-send -a Omarchy "AppImages updated" "${UPDATED[*]}" 2>/dev/null
+  fi
+else
+  say "\nAll tracked AppImages are current."
+fi
+
+if ((${#FAILED[@]})); then
+  printf '\e[33m%s\e[0m\n' "${FAILED[@]}" >&2
+  exit 1
+fi
+
+exit 0

@@ -1,0 +1,31 @@
+#!/bin/bash
+
+# Enable Flatpak application support on Omarchy: the runtime, the Flathub
+# remote, the GTK portal Flatpak apps need for file dialogs, and the
+# XDG_DATA_DIRS wiring that puts Flatpak launchers in the app search selector.
+
+set -e
+
+echo -e "\e[32mEnabling Flatpak application support...\e[0m\n"
+
+omarchy-pkg-add flatpak xdg-desktop-portal-gtk
+
+FLATHUB_URL="https://dl.flathub.org/repo/flathub.flatpakrepo"
+
+# User remote first: app installs then need no polkit password, and their
+# exports land in ~/.local/share/flatpak/exports.
+flatpak remote-add --user --if-not-exists flathub "$FLATHUB_URL"
+
+# System remote too, so apps installed system-wide (or by another tool) resolve.
+if ! flatpak remotes --system --columns=name | grep -qx flathub; then
+  echo "Adding the system-wide Flathub remote (needs sudo)..."
+  sudo flatpak remote-add --system --if-not-exists flathub "$FLATHUB_URL"
+fi
+
+# Persist the export dirs for future logins.
+omarchy-app-entries-install-env
+
+echo
+omarchy-app-entries-refresh
+
+echo -e "\n\e[32mFlatpak is ready.\e[0m Install apps from the Omarchy menu: Install > Flatpak > Flathub App"

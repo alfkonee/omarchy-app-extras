@@ -1,0 +1,76 @@
+#!/bin/bash
+
+# Enable, disable, or inspect the daily check for new GitHub releases of the
+# tracked AppImages. Backed by a systemd user timer, so a missed run (laptop
+# asleep, machine off) is caught up at the next boot.
+#
+# Usage: omarchy-appimage-watch [enable|disable|status|run] [--quiet]
+
+set -euo pipefail
+
+UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+SERVICE="omarchy-appimage-update.service"
+TIMER="omarchy-appimage-update.timer"
+
+ACTION="${1-status}"
+QUIET=0
+[[ ${2-} == "--quiet" ]] && QUIET=1
+
+say() { ((QUIET)) || echo -e "$@"; }
+
+write_units() {
+  mkdir -p "$UNIT_DIR"
+
+  cat >"$UNIT_DIR/$SERVICE" <<EOF
+[Unit]
+Description=Update AppImages installed from GitHub releases
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/omarchy-update-appimages --notify --quiet
+EOF
+
+  cat >"$UNIT_DIR/$TIMER" <<EOF
+[Unit]
+Description=Daily check for new AppImage releases
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  systemctl --user daemon-reload
+}
+
+case $ACTION in
+enable)
+  write_units
+  systemctl --user enable --now "$TIMER" >/dev/null
+  say "AppImage update watch enabled (daily)."
+  ;;
+disable)
+  systemctl --user disable --now "$TIMER" >/dev/null 2>&1 || true
+  say "AppImage update watch disabled."
+  ;;
+run)
+  systemctl --user start "$SERVICE"
+  say "Update check started; see: journalctl --user -u $SERVICE -n 20"
+  ;;
+status)
+  if systemctl --user is-enabled "$TIMER" &>/dev/null; then
+    systemctl --user list-timers "$TIMER" --no-pager
+  else
+    echo "AppImage update watch is disabled."
+    exit 1
+  fi
+  ;;
+*)
+  echo "Usage: omarchy-appimage-watch [enable|disable|status|run]" >&2
+  exit 2
+  ;;
+esac

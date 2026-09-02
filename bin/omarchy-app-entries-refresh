@@ -1,0 +1,126 @@
+#!/bin/bash
+
+# Post-install trigger: make Flatpak and AppImage apps visible in the Omarchy
+# app search selector (Quickshell DesktopEntries) without a logout.
+#
+# The launcher only sees .desktop files under $XDG_DATA_HOME/applications and
+# the applications/ dir of every entry in XDG_DATA_DIRS, resolved when the shell
+# process started. Omarchy's session ships XDG_DATA_DIRS=/usr/local/share:/usr/share,
+# so Flatpak's export roots are invisible until they are added and the shell is
+# restarted. AppImage entries live in $XDG_DATA_HOME/applications, which the
+# shell already watches live.
+#
+# Usage: omarchy-app-entries-refresh [--no-restart] [--quiet]
+
+set -uo pipefail
+
+RESTART=1
+QUIET=0
+
+for arg in "$@"; do
+  case $arg in
+  --no-restart) RESTART=0 ;;
+  --quiet) QUIET=1 ;;
+  -h | --help)
+    sed -n '3,16p' "$0" | sed 's/^# \?//'
+    exit 0
+    ;;
+  esac
+done
+
+say() { ((QUIET)) || echo -e "$@"; }
+
+DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+EXPORT_ROOTS=("/var/lib/flatpak/exports/share" "$DATA_HOME/flatpak/exports/share")
+
+# The session's value, not this shell's: a terminal, SSH login, or agent can
+# carry a different XDG_DATA_DIRS than the compositor handed to the launcher.
+session_data_dirs() {
+  local value
+  value=$(systemctl --user show-environment 2>/dev/null | sed -n 's/^XDG_DATA_DIRS=//p' | tail -n1)
+  [[ -z $value ]] && value=${XDG_DATA_DIRS:-}
+  [[ -z $value ]] && value="/usr/local/share:/usr/share"
+  printf '%s' "$value"
+}
+
+# Flatpak only creates its export dirs when the first app is exported, but the
+# launcher resolves and watches XDG_DATA_DIRS once at startup. Create the user
+# root up front so the watcher has something to attach to, and carry both roots
+# as soon as flatpak exists rather than waiting for the first install.
+flatpak_installed() { command -v flatpak &>/dev/null; }
+
+ensure_export_dirs() {
+  flatpak_installed || return 0
+  mkdir -p "$DATA_HOME/flatpak/exports/share/applications" \
+    "$DATA_HOME/flatpak/exports/share/icons" 2>/dev/null
+}
+
+want_root() {
+  [[ -d $1 ]] || flatpak_installed
+}
+
+append_missing_roots() {
+  local value="$1" root
+  for root in "${EXPORT_ROOTS[@]}"; do
+    want_root "$root" || continue
+    case ":$value:" in
+    *":$root:"*) ;;
+    *) value="$value:$root" ;;
+    esac
+  done
+  printf '%s' "$value"
+}
+
+# Env of the running shell, so a restart is only paid for when it buys something.
+shell_has_roots() {
+  local pid root env
+  pid=$(pgrep -f 'quickshell -n -p' | head -n1)
+  [[ -n $pid ]] || return 1
+  env=$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | sed -n 's/^XDG_DATA_DIRS=//p' | tail -n1)
+  [[ -n $env ]] || return 1
+  for root in "${EXPORT_ROOTS[@]}"; do
+    want_root "$root" || continue
+    case ":$env:" in
+    *":$root:"*) ;;
+    *) return 1 ;;
+    esac
+  done
+  return 0
+}
+
+ensure_export_dirs
+
+current=$(session_data_dirs)
+wanted=$(append_missing_roots "$current")
+
+if [[ $wanted != "$current" ]]; then
+  say "Adding Flatpak export dirs to XDG_DATA_DIRS"
+  # Hyprland's own environment: omarchy-restart-shell respawns the shell through
+  # the compositor, so this is the copy the launcher will inherit.
+  hyprctl eval "hl.env(\"XDG_DATA_DIRS\", \"$wanted\")" >/dev/null 2>&1
+  systemctl --user set-environment "XDG_DATA_DIRS=$wanted" 2>/dev/null
+  dbus-update-activation-environment --systemd "XDG_DATA_DIRS=$wanted" 2>/dev/null
+fi
+
+# Desktop/icon caches for entries written into the user's own data dir.
+mkdir -p "$DATA_HOME/applications"
+update-desktop-database "$DATA_HOME/applications" 2>/dev/null
+[[ -d $DATA_HOME/icons/hicolor ]] && gtk-update-icon-cache -f -t "$DATA_HOME/icons/hicolor" &>/dev/null
+
+# Drop launchers left behind by an AppImage that is no longer on disk.
+shopt -s nullglob
+for entry in "$DATA_HOME/applications"/appimage-*.desktop; do
+  source_path=$(sed -n 's/^X-AppImage-Source=//p' "$entry" | head -n1)
+  [[ -n $source_path && ! -f $source_path ]] && rm -f "$entry" &&
+    say "Removed stale launcher for missing AppImage: $(basename "$entry")"
+done
+shopt -u nullglob
+
+if ((RESTART)) && ! shell_has_roots; then
+  if command -v flatpak &>/dev/null; then
+    say "Restarting the Omarchy shell so the app launcher picks up Flatpak apps"
+    omarchy-restart-shell >/dev/null 2>&1 || say "Shell restart failed; log out and back in to finish."
+  fi
+fi
+
+exit 0

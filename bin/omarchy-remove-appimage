@@ -1,0 +1,63 @@
+#!/bin/bash
+
+# Remove an installed AppImage: its launcher, its icon, and the image itself.
+#
+# Usage: omarchy-remove-appimage [name-or-desktop-id]
+
+set -euo pipefail
+
+DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+DESKTOP_DIR="$DATA_HOME/applications"
+ICON_DIR="$DATA_HOME/icons/hicolor/256x256/apps"
+
+shopt -s nullglob
+ENTRIES=("$DESKTOP_DIR"/appimage-*.desktop)
+shopt -u nullglob
+
+if ((${#ENTRIES[@]} == 0)); then
+  echo "No AppImage apps are installed."
+  exit 0
+fi
+
+TARGET="${1-}"
+SELECTED=""
+
+if [[ -n $TARGET ]]; then
+  for entry in "${ENTRIES[@]}"; do
+    id=$(basename "$entry" .desktop)
+    name=$(sed -n 's/^Name=//p' "$entry" | head -n1)
+    if [[ $id == "$TARGET" || $id == "appimage-$TARGET" || $name == "$TARGET" ]]; then
+      SELECTED=$entry
+      break
+    fi
+  done
+  [[ -n $SELECTED ]] || { echo "No installed AppImage matches '$TARGET'."; exit 1; }
+else
+  rows=()
+  for entry in "${ENTRIES[@]}"; do
+    name=$(sed -n 's/^Name=//p' "$entry" | head -n1)
+    rows+=("${name:-$(basename "$entry" .desktop)}"$'\t'"$entry")
+  done
+
+  CHOICE=$(printf '%s\n' "${rows[@]}" | cut -f1 |
+    gum choose --header "Select an AppImage to remove (esc to cancel)" --height 15)
+  [[ -n ${CHOICE:-} ]] || { echo "Cancelled."; exit 1; }
+
+  for row in "${rows[@]}"; do
+    [[ ${row%%$'\t'*} == "$CHOICE" ]] && SELECTED=${row#*$'\t'} && break
+  done
+fi
+
+APP_NAME=$(sed -n 's/^Name=//p' "$SELECTED" | head -n1)
+APP_PATH=$(sed -n 's/^X-AppImage-Source=//p' "$SELECTED" | head -n1)
+APP_ID=$(basename "$SELECTED" .desktop)
+
+gum confirm "Remove ${APP_NAME:-$APP_ID} and delete $APP_PATH?" || { echo "Cancelled."; exit 1; }
+
+rm -f "$SELECTED"
+[[ -n $APP_PATH && -f $APP_PATH ]] && rm -f "$APP_PATH"
+rm -f "$ICON_DIR/$APP_ID".{png,svg}
+
+omarchy-app-entries-refresh --no-restart --quiet
+
+echo -e "\n\e[32m${APP_NAME:-$APP_ID} removed.\e[0m"

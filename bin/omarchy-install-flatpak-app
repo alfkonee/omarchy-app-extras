@@ -1,0 +1,62 @@
+#!/bin/bash
+
+# Search Flathub and install an app, then register its launcher with the app
+# search selector.
+#
+# Usage: omarchy-install-flatpak-app [app-id-or-search-term]
+
+set -euo pipefail
+
+if ! command -v flatpak &>/dev/null; then
+  echo -e "\e[33mFlatpak is not enabled yet. Enabling it first...\e[0m\n"
+  omarchy-install-flatpak
+fi
+
+if ! flatpak remotes --user --columns=name | grep -qx flathub; then
+  flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+fi
+
+QUERY="${1-}"
+
+if [[ -z $QUERY ]]; then
+  echo -e "\e[32mSearch Flathub for an app to install.\e[0m\n"
+  QUERY=$(gum input --prompt "Search> " --placeholder "obs, gimp, bottles, ...")
+fi
+
+[[ -n $QUERY ]] || { echo "Nothing to search for."; exit 1; }
+
+# An exact app id needs no picker.
+if [[ $QUERY == *.*.* ]] && flatpak remote-info --user flathub "$QUERY" &>/dev/null; then
+  APP_ID=$QUERY
+else
+  echo "Searching Flathub for '$QUERY'..."
+  # flatpak search prints tab-separated columns; keep name and id together so the
+  # picker reads well and the id is still recoverable.
+  mapfile -t RESULTS < <(flatpak search --columns=name,application,description "$QUERY" 2>/dev/null |
+    awk -F'\t' 'NF >= 2 { desc = $3; if (length(desc) > 70) desc = substr(desc, 1, 67) "..."; printf "%s\t%s\t%s\n", $1, $2, desc }')
+
+  if ((${#RESULTS[@]} == 0)); then
+    echo "No Flathub apps matched '$QUERY'."
+    exit 1
+  fi
+
+  CHOICE=$(printf '%s\n' "${RESULTS[@]}" |
+    column -t -s $'\t' |
+    gum filter --header "Select an app to install (esc to cancel)" --height 15)
+
+  [[ -n ${CHOICE:-} ]] || { echo "Cancelled."; exit 1; }
+
+  # Second whitespace-separated field of the formatted row is the app id.
+  APP_ID=$(awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+){2,}$/) { print $i; exit } }' <<<"$CHOICE")
+fi
+
+[[ -n ${APP_ID:-} ]] || { echo "Could not determine the app id."; exit 1; }
+
+echo -e "\nInstalling \e[32m$APP_ID\e[0m from Flathub (user install)..."
+flatpak install --user -y --noninteractive flathub "$APP_ID"
+
+echo
+omarchy-app-entries-refresh
+
+APP_NAME=$(flatpak info --user "$APP_ID" 2>/dev/null | sed -n 's/^ *Name: *//p' | head -n1)
+echo -e "\n\e[32m${APP_NAME:-$APP_ID} installed.\e[0m Find it with the app launcher (SUPER + SPACE)."

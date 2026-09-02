@@ -1,0 +1,206 @@
+#!/bin/bash
+
+# Integrate an AppImage into Omarchy: install it under ~/Applications, lift the
+# bundled .desktop entry and icon out of the image, and register the launcher so
+# the app shows up in the app search selector.
+#
+# Usage: omarchy-install-appimage [/path/to/App.AppImage] [options]
+#
+# Options record where the image came from so omarchy-update-appimages can track
+# new releases. They are set by omarchy-install-appimage-github, not by hand:
+#   --repo owner/repo    GitHub repository the release came from
+#   --release <tag>      release tag installed
+#   --asset <name>       release asset file name
+#   --asset-glob <glob>  version-agnostic asset name pattern
+#   --published <date>   release publish timestamp (tracks continuous builds)
+#   --keep-source        install the file in place instead of copying it
+#   --quiet              no closing summary
+
+set -euo pipefail
+
+APPS_DIR="$HOME/Applications"
+DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+DESKTOP_DIR="$DATA_HOME/applications"
+ICON_DIR="$DATA_HOME/icons/hicolor/256x256/apps"
+
+slug() {
+  printf '%s\n' "$1" |
+    tr '[:upper:]' '[:lower:]' |
+    sed 's/[^[:alnum:]]\+/-/g; s/^-//; s/-$//'
+}
+
+desktop_string_escape() {
+  local value="$1"
+  value=${value//\\/\\\\}
+  value=${value//$'\t'/\\t}
+  value=${value//$'\r'/\\r}
+  value=${value//$'\n'/\\n}
+  [[ $value == " "* ]] && value="\\s${value# }"
+  printf '%s' "$value"
+}
+
+SOURCE=""
+SRC_REPO=""
+SRC_RELEASE=""
+SRC_ASSET=""
+SRC_ASSET_GLOB=""
+SRC_PUBLISHED=""
+KEEP_SOURCE=0
+QUIET=0
+
+while (($#)); do
+  case $1 in
+  --repo) SRC_REPO=$2; shift 2 ;;
+  --release) SRC_RELEASE=$2; shift 2 ;;
+  --asset) SRC_ASSET=$2; shift 2 ;;
+  --asset-glob) SRC_ASSET_GLOB=$2; shift 2 ;;
+  --published) SRC_PUBLISHED=$2; shift 2 ;;
+  --keep-source) KEEP_SOURCE=1; shift ;;
+  --quiet) QUIET=1; shift ;;
+  -h | --help)
+    sed -n '3,17p' "$0" | sed 's/^# \?//'
+    exit 0
+    ;;
+  *) SOURCE=$1; shift ;;
+  esac
+done
+
+if [[ -z $SOURCE ]]; then
+  echo -e "\e[32mPick the AppImage file to install.\e[0m\n"
+  mapfile -t FOUND < <(find "$HOME/Downloads" "$HOME/Desktop" "$HOME" -maxdepth 1 -iname '*.appimage' -type f 2>/dev/null | sort -u)
+
+  if ((${#FOUND[@]} > 0)); then
+    SOURCE=$(printf '%s\n' "${FOUND[@]}" "Browse..." | gum choose --header "AppImage to install" --height 12)
+    [[ $SOURCE == "Browse..." ]] && SOURCE=$(gum file "$HOME")
+  else
+    SOURCE=$(gum file "$HOME")
+  fi
+fi
+
+[[ -n ${SOURCE:-} ]] || { echo "Cancelled."; exit 1; }
+[[ -f $SOURCE ]] || { echo "Not a file: $SOURCE"; exit 1; }
+
+SOURCE=$(realpath "$SOURCE")
+
+# Type-2 AppImages self-mount through libfuse2; without it they only run via
+# --appimage-extract-and-run, which is slow and breaks some apps.
+if ! pacman -Q fuse2 &>/dev/null; then
+  echo -e "AppImages need FUSE 2 to run. Installing it...\n"
+  omarchy-pkg-add fuse2
+fi
+
+mkdir -p "$APPS_DIR" "$DESKTOP_DIR" "$ICON_DIR"
+
+BASENAME=$(basename "$SOURCE")
+TARGET="$APPS_DIR/$BASENAME"
+
+if [[ $SOURCE != "$TARGET" ]]; then
+  if ((KEEP_SOURCE)); then
+    mv -f "$SOURCE" "$TARGET"
+  else
+    cp -f "$SOURCE" "$TARGET"
+  fi
+fi
+chmod +x "$TARGET"
+
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+
+echo "Reading metadata out of $BASENAME..."
+# --appimage-extract unpacks the embedded squashfs directly; it needs no FUSE
+# mount, so it also works on a machine where fuse2 was just installed.
+(cd "$WORK" && "$TARGET" --appimage-extract >/dev/null 2>&1) || true
+
+ROOT="$WORK/squashfs-root"
+EMBEDDED_DESKTOP=""
+[[ -d $ROOT ]] && EMBEDDED_DESKTOP=$(find "$ROOT" -maxdepth 1 -name '*.desktop' -type f | head -n1)
+[[ -z $EMBEDDED_DESKTOP && -d $ROOT ]] && EMBEDDED_DESKTOP=$(find "$ROOT/usr/share/applications" -name '*.desktop' -type f 2>/dev/null | head -n1)
+
+read_key() {
+  [[ -n $EMBEDDED_DESKTOP ]] || return 0
+  sed -n "s/^$1=//p" "$EMBEDDED_DESKTOP" | head -n1
+}
+
+APP_NAME=$(read_key Name)
+[[ -z $APP_NAME ]] && APP_NAME=$(sed 's/\.[Aa]pp[Ii]mage$//; s/[-_]x86_64$//; s/[-_][0-9][^-_]*$//' <<<"$BASENAME")
+APP_ID="appimage-$(slug "$APP_NAME")"
+
+APP_COMMENT=$(read_key Comment)
+[[ -z $APP_COMMENT ]] && APP_COMMENT="$APP_NAME (AppImage)"
+APP_CATEGORIES=$(read_key Categories)
+[[ -z $APP_CATEGORIES ]] && APP_CATEGORIES="Utility;"
+APP_MIME=$(read_key MimeType)
+APP_TERMINAL=$(read_key Terminal)
+[[ $APP_TERMINAL != "true" ]] && APP_TERMINAL="false"
+
+# Keep the field code from the bundled Exec so file/URL arguments still work.
+EMBEDDED_EXEC=$(read_key Exec)
+FIELD_CODE=""
+[[ $EMBEDDED_EXEC =~ (%[fFuU]) ]] && FIELD_CODE=" ${BASH_REMATCH[1]}"
+
+ICON_VALUE="application-x-executable"
+ICON_NAME=$(read_key Icon)
+ICON_SOURCE=""
+
+if [[ -d $ROOT ]]; then
+  if [[ -n $ICON_NAME ]]; then
+    # Largest file wins: AppImages ship the same icon at several resolutions and
+    # byte size tracks resolution far more reliably than the theme path does.
+    ICON_SOURCE=$(find "$ROOT" \( -name "$ICON_NAME.png" -o -name "$ICON_NAME.svg" \) -type f -printf '%s\t%p\n' 2>/dev/null |
+      sort -rn | head -n1 | cut -f2-)
+  fi
+  [[ -z $ICON_SOURCE && -f $ROOT/.DirIcon ]] && ICON_SOURCE=$(realpath "$ROOT/.DirIcon" 2>/dev/null)
+  [[ -z $ICON_SOURCE ]] && ICON_SOURCE=$(find "$ROOT" -maxdepth 1 \( -name '*.png' -o -name '*.svg' \) -type f -printf '%s\t%p\n' 2>/dev/null |
+    sort -rn | head -n1 | cut -f2-)
+fi
+
+if [[ -n $ICON_SOURCE && -f $ICON_SOURCE ]]; then
+  EXT="${ICON_SOURCE##*.}"
+  [[ $EXT == "$ICON_SOURCE" ]] && EXT="png"
+  cp -f "$ICON_SOURCE" "$ICON_DIR/$APP_ID.$EXT"
+  ICON_VALUE="$APP_ID"
+fi
+
+DESKTOP_FILE="$DESKTOP_DIR/$APP_ID.desktop"
+
+# A reinstall (same app, new release) leaves the previous image behind under a
+# different versioned file name; remember it so it can be dropped below.
+PREVIOUS_TARGET=""
+[[ -f $DESKTOP_FILE ]] && PREVIOUS_TARGET=$(sed -n 's/^X-AppImage-Source=//p' "$DESKTOP_FILE" | head -n1)
+
+cat >"$DESKTOP_FILE" <<EOF
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=$(desktop_string_escape "$APP_NAME")
+Comment=$(desktop_string_escape "$APP_COMMENT")
+Exec="$TARGET"$FIELD_CODE
+Icon=$(desktop_string_escape "$ICON_VALUE")
+Terminal=$APP_TERMINAL
+StartupNotify=true
+Categories=$(desktop_string_escape "$APP_CATEGORIES")
+X-AppImage-Source=$(desktop_string_escape "$TARGET")
+EOF
+
+[[ -n $APP_MIME ]] && printf 'MimeType=%s\n' "$(desktop_string_escape "$APP_MIME")" >>"$DESKTOP_FILE"
+[[ -n $SRC_REPO ]] && printf 'X-AppImage-Repo=%s\n' "$(desktop_string_escape "$SRC_REPO")" >>"$DESKTOP_FILE"
+[[ -n $SRC_RELEASE ]] && printf 'X-AppImage-Release=%s\n' "$(desktop_string_escape "$SRC_RELEASE")" >>"$DESKTOP_FILE"
+[[ -n $SRC_ASSET ]] && printf 'X-AppImage-Asset=%s\n' "$(desktop_string_escape "$SRC_ASSET")" >>"$DESKTOP_FILE"
+[[ -n $SRC_ASSET_GLOB ]] && printf 'X-AppImage-Asset-Glob=%s\n' "$(desktop_string_escape "$SRC_ASSET_GLOB")" >>"$DESKTOP_FILE"
+[[ -n $SRC_PUBLISHED ]] && printf 'X-AppImage-Published=%s\n' "$(desktop_string_escape "$SRC_PUBLISHED")" >>"$DESKTOP_FILE"
+
+if [[ -n $PREVIOUS_TARGET && $PREVIOUS_TARGET != "$TARGET" && -f $PREVIOUS_TARGET ]]; then
+  rm -f "$PREVIOUS_TARGET"
+fi
+
+chmod +x "$DESKTOP_FILE"
+
+omarchy-app-entries-refresh --no-restart --quiet
+
+if ((QUIET == 0)); then
+  echo -e "\n\e[32m$APP_NAME installed.\e[0m"
+  echo "  AppImage: $TARGET"
+  echo "  Launcher: $DESKTOP_FILE"
+  [[ -n $SRC_REPO ]] && echo "  Tracking: github.com/$SRC_REPO @ $SRC_RELEASE"
+  echo -e "\nFind it with the app launcher (SUPER + SPACE).\n"
+fi

@@ -1,0 +1,36 @@
+#!/bin/bash
+
+# Uninstall a Flatpak app and drop its launcher from the app search selector.
+#
+# Usage: omarchy-remove-flatpak-app [app-id]
+
+set -euo pipefail
+
+command -v flatpak &>/dev/null || { echo "Flatpak is not installed."; exit 1; }
+
+APP_ID="${1-}"
+
+if [[ -z $APP_ID ]]; then
+  mapfile -t APPS < <(flatpak list --app --columns=name,application 2>/dev/null | awk -F'\t' 'NF >= 2 { printf "%s\t%s\n", $1, $2 }')
+
+  if ((${#APPS[@]} == 0)); then
+    echo "No Flatpak apps are installed."
+    exit 0
+  fi
+
+  CHOICE=$(printf '%s\n' "${APPS[@]}" |
+    column -t -s $'\t' |
+    gum choose --header "Select a Flatpak app to remove (esc to cancel)" --height 15)
+
+  [[ -n ${CHOICE:-} ]] || { echo "Cancelled."; exit 1; }
+  APP_ID=$(awk '{ print $NF }' <<<"$CHOICE")
+fi
+
+gum confirm "Remove $APP_ID?" || { echo "Cancelled."; exit 1; }
+
+flatpak uninstall -y --noninteractive "$APP_ID"
+flatpak uninstall --unused -y --noninteractive || true
+
+omarchy-app-entries-refresh --no-restart
+
+echo -e "\n\e[32m$APP_ID removed.\e[0m"
