@@ -146,6 +146,21 @@ user-level opt-in for something upstream decided not to carry.
   underlying launcher-visibility bug (session `XDG_DATA_DIRS` omits the Flatpak
   export roots) is still open.
 
+Pieces of this work have since been sent upstream, so the parts that belong in
+Omarchy proper can land there instead of living here forever:
+
+- [omacom/omarchy#9906](https://github.com/omacom/omarchy/pull/9906) — the
+  session `XDG_DATA_DIRS` fix for #8650, as a standalone bug fix.
+- [omacom/omarchy#9908](https://github.com/omacom/omarchy/pull/9908) — AppImage
+  install/remove as first-class commands and menu rows.
+- [omacom/omarchy#9909](https://github.com/omacom/omarchy/pull/9909) — AppImage
+  tracking from GitHub releases with a daily update timer (stacked on #9908).
+- [omacom/omarchy discussion #9911](https://github.com/omacom/omarchy/discussions/9911)
+  — the opt-in Flatpak menu proposal, in the sanctioned Suggestions channel.
+
+If those land, install the corresponding pieces from Omarchy itself and keep
+this repo only for whatever upstream declines.
+
 So the packaging decision is upstream's to make and has been made. The bug in
 issue #8650 is real either way, and this repo is a way to have Flatpak and
 AppImage apps behave like first-class Omarchy apps on your own machine without
