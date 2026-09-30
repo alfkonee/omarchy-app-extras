@@ -3,7 +3,9 @@
 # Install an AppImage straight from a GitHub repository's releases and remember
 # where it came from, so omarchy-update-appimages can keep it current.
 #
-# Usage: omarchy-install-appimage-github [owner/repo | github url] [asset-name]
+# Usage: omarchy-install-appimage-github [--prerelease] [owner/repo | github url] [asset-name]
+#   --prerelease   install and keep following the newest prerelease, not only
+#                  stable releases (asked interactively when no repo is given)
 
 set -euo pipefail
 
@@ -11,19 +13,39 @@ source "$HOME/.local/lib/omarchy/appimage.sh"
 
 command -v jq &>/dev/null || { echo "jq is required."; exit 1; }
 
-INPUT="${1-}"
-WANTED_ASSET="${2-}"
+PRERELEASE=0
+POSITIONAL=()
+for arg in "$@"; do
+  case $arg in
+  --prerelease) PRERELEASE=1 ;;
+  -h | --help)
+    sed -n '3,8p' "$0" | sed 's/^# \?//'
+    exit 0
+    ;;
+  *) POSITIONAL+=("$arg") ;;
+  esac
+done
+
+INPUT="${POSITIONAL[0]-}"
+WANTED_ASSET="${POSITIONAL[1]-}"
 
 if [[ -z $INPUT ]]; then
   echo -e "\e[32mInstall an AppImage from a GitHub repository's releases.\e[0m\n"
   INPUT=$(gum input --prompt "Repo> " --placeholder "owner/repo or https://github.com/owner/repo")
+  if ((PRERELEASE == 0)) && gum confirm --default=false "Follow prereleases (beta/nightly builds) too?"; then
+    PRERELEASE=1
+  fi
 fi
 
 REPO=$(normalize_repo "$INPUT")
 [[ $REPO == */* ]] || { echo "Not a GitHub repo: $INPUT"; exit 1; }
 
-echo "Looking up the latest release of $REPO..."
-RELEASE=$(latest_release_json "$REPO" || true)
+if ((PRERELEASE)); then
+  echo "Looking up the newest release or prerelease of $REPO..."
+else
+  echo "Looking up the latest release of $REPO..."
+fi
+RELEASE=$(latest_release_json "$REPO" "$PRERELEASE" || true)
 
 if [[ -z ${RELEASE:-} ]]; then
   echo "No releases found for $REPO (or GitHub rate-limited the request)."
@@ -67,13 +89,17 @@ trap 'rm -rf "$WORK"' EXIT
 echo -e "\nDownloading \e[32m$ASSET_NAME\e[0m ($REPO $TAG)..."
 download_asset "$ASSET_URL" "$WORK/$ASSET_NAME"
 
-omarchy-install-appimage "$WORK/$ASSET_NAME" \
-  --keep-source \
-  --repo "$REPO" \
-  --release "$TAG" \
-  --asset "$ASSET_NAME" \
-  --asset-glob "$ASSET_GLOB" \
+INSTALL_ARGS=(
+  --keep-source
+  --repo "$REPO"
+  --release "$TAG"
+  --asset "$ASSET_NAME"
+  --asset-glob "$ASSET_GLOB"
   --published "$PUBLISHED"
+)
+((PRERELEASE)) && INSTALL_ARGS+=(--prerelease)
+
+omarchy-install-appimage "$WORK/$ASSET_NAME" "${INSTALL_ARGS[@]}"
 
 # Tracking an app is what makes the daily update check worth running.
 omarchy-appimage-watch enable --quiet

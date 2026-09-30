@@ -7,9 +7,13 @@
 # Usage: omarchy-install-appimage [/path/to/App.AppImage] [options]
 #
 # Options record where the image came from so omarchy-update-appimages can track
-# new releases. They are set by omarchy-install-appimage-github, not by hand:
+# new releases. They are set by omarchy-install-appimage-github and
+# omarchy-install-appimage-url, not by hand:
 #   --repo owner/repo    GitHub repository the release came from
 #   --release <tag>      release tag installed
+#   --prerelease         track prereleases of --repo, not only stable releases
+#   --url <url>          direct download URL to re-check instead of a repo
+#   --url-stamp <stamp>  ETag/Last-Modified/size validator of the --url download
 #   --asset <name>       release asset file name
 #   --asset-glob <glob>  version-agnostic asset name pattern
 #   --published <date>   release publish timestamp (tracks continuous builds)
@@ -45,6 +49,9 @@ SRC_RELEASE=""
 SRC_ASSET=""
 SRC_ASSET_GLOB=""
 SRC_PUBLISHED=""
+SRC_PRERELEASE=0
+SRC_URL=""
+SRC_URL_STAMP=""
 KEEP_SOURCE=0
 QUIET=0
 
@@ -55,10 +62,13 @@ while (($#)); do
   --asset) SRC_ASSET=$2; shift 2 ;;
   --asset-glob) SRC_ASSET_GLOB=$2; shift 2 ;;
   --published) SRC_PUBLISHED=$2; shift 2 ;;
+  --prerelease) SRC_PRERELEASE=1; shift ;;
+  --url) SRC_URL=$2; shift 2 ;;
+  --url-stamp) SRC_URL_STAMP=$2; shift 2 ;;
   --keep-source) KEEP_SOURCE=1; shift ;;
   --quiet) QUIET=1; shift ;;
   -h | --help)
-    sed -n '3,17p' "$0" | sed 's/^# \?//'
+    sed -n '3,21p' "$0" | sed 's/^# \?//'
     exit 0
     ;;
   *) SOURCE=$1; shift ;;
@@ -188,6 +198,9 @@ EOF
 [[ -n $SRC_ASSET ]] && printf 'X-AppImage-Asset=%s\n' "$(desktop_string_escape "$SRC_ASSET")" >>"$DESKTOP_FILE"
 [[ -n $SRC_ASSET_GLOB ]] && printf 'X-AppImage-Asset-Glob=%s\n' "$(desktop_string_escape "$SRC_ASSET_GLOB")" >>"$DESKTOP_FILE"
 [[ -n $SRC_PUBLISHED ]] && printf 'X-AppImage-Published=%s\n' "$(desktop_string_escape "$SRC_PUBLISHED")" >>"$DESKTOP_FILE"
+[[ -n $SRC_REPO ]] && ((SRC_PRERELEASE)) && printf 'X-AppImage-Prerelease=true\n' >>"$DESKTOP_FILE"
+[[ -n $SRC_URL ]] && printf 'X-AppImage-Url=%s\n' "$(desktop_string_escape "$SRC_URL")" >>"$DESKTOP_FILE"
+[[ -n $SRC_URL_STAMP ]] && printf 'X-AppImage-Url-Stamp=%s\n' "$(desktop_string_escape "$SRC_URL_STAMP")" >>"$DESKTOP_FILE"
 
 if [[ -n $PREVIOUS_TARGET && $PREVIOUS_TARGET != "$TARGET" && -f $PREVIOUS_TARGET ]]; then
   rm -f "$PREVIOUS_TARGET"
@@ -201,6 +214,11 @@ if ((QUIET == 0)); then
   echo -e "\n\e[32m$APP_NAME installed.\e[0m"
   echo "  AppImage: $TARGET"
   echo "  Launcher: $DESKTOP_FILE"
-  [[ -n $SRC_REPO ]] && echo "  Tracking: github.com/$SRC_REPO @ $SRC_RELEASE"
+  if [[ -n $SRC_REPO ]]; then
+    channel="stable releases"
+    ((SRC_PRERELEASE)) && channel="prereleases included"
+    echo "  Tracking: github.com/$SRC_REPO @ $SRC_RELEASE ($channel)"
+  fi
+  [[ -n $SRC_URL ]] && echo "  Tracking: $SRC_URL"
   echo -e "\nFind it with the app launcher (SUPER + SPACE).\n"
 fi

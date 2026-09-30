@@ -1,8 +1,10 @@
 #!/bin/bash
 
-# Check every AppImage installed from a GitHub release for a newer release and
-# reinstall the ones that moved. Run by hand, by the daily watch timer, and by
-# the post-update hook.
+# Check every tracked AppImage for a newer build and reinstall the ones that
+# moved. GitHub-tracked apps follow stable releases, or prereleases too when
+# installed with --prerelease; URL-tracked apps are re-probed for a changed
+# ETag, Last-Modified, size, or file name. Run by hand, by the daily watch
+# timer, and by the post-update hook.
 #
 # Usage: omarchy-update-appimages [--check] [--notify] [--quiet]
 #   --check    report what would update, install nothing
@@ -23,7 +25,7 @@ for arg in "$@"; do
   --notify) NOTIFY=1 ;;
   --quiet) QUIET=1 ;;
   -h | --help)
-    sed -n '3,11p' "$0" | sed 's/^# \?//'
+    sed -n '3,13p' "$0" | sed 's/^# \?//'
     exit 0
     ;;
   esac
@@ -45,24 +47,54 @@ TRACKED=0
 UPDATED=()
 FAILED=()
 
-for entry in "${ENTRIES[@]}"; do
-  repo=$(sed -n 's/^X-AppImage-Repo=//p' "$entry" | head -n1)
-  [[ -n $repo ]] || continue
-  ((TRACKED++))
+desktop_key() {
+  sed -n "s/^$1=//p" "$2" | head -n1
+}
 
-  name=$(sed -n 's/^Name=//p' "$entry" | head -n1)
-  have_tag=$(sed -n 's/^X-AppImage-Release=//p' "$entry" | head -n1)
-  have_published=$(sed -n 's/^X-AppImage-Published=//p' "$entry" | head -n1)
-  asset_name=$(sed -n 's/^X-AppImage-Asset=//p' "$entry" | head -n1)
-  asset_pattern=$(sed -n 's/^X-AppImage-Asset-Glob=//p' "$entry" | head -n1)
+# Download a new build and reinstall it over the old one. Remaining arguments
+# are the tracking options handed to omarchy-install-appimage.
+install_update() {
+  local name="$1" label="$2" url="$3" asset="$4" work
+  shift 4
+
+  work=$(mktemp -d)
+  if ! download_asset "$url" "$work/$asset"; then
+    rm -rf "$work"
+    FAILED+=("$name: download failed")
+    return
+  fi
+
+  if omarchy-install-appimage "$work/$asset" --keep-source --quiet --asset "$asset" "$@"; then
+    UPDATED+=("$name $label")
+  else
+    FAILED+=("$name: install failed")
+  fi
+  rm -rf "$work"
+}
+
+update_from_github() {
+  local entry="$1" name="$2" repo="$3"
+  local have_tag have_published asset_name asset_pattern prerelease=0
+  local release tag published selected row candidate new_asset new_url
+  local -a assets tracking
+
+  have_tag=$(desktop_key X-AppImage-Release "$entry")
+  have_published=$(desktop_key X-AppImage-Published "$entry")
+  asset_name=$(desktop_key X-AppImage-Asset "$entry")
+  asset_pattern=$(desktop_key X-AppImage-Asset-Glob "$entry")
   [[ -n $asset_pattern ]] || asset_pattern=$asset_name
+  [[ $(desktop_key X-AppImage-Prerelease "$entry") == true ]] && prerelease=1
 
-  say "Checking $name ($repo)..."
-  release=$(latest_release_json "$repo")
+  if ((prerelease)); then
+    say "Checking $name ($repo, prereleases included)..."
+  else
+    say "Checking $name ($repo)..."
+  fi
+  release=$(latest_release_json "$repo" "$prerelease")
 
   if [[ -z $release ]]; then
     FAILED+=("$name: could not reach GitHub")
-    continue
+    return
   fi
 
   tag=$(jq -r '.tag_name // empty' <<<"$release")
@@ -72,11 +104,11 @@ for entry in "${ENTRIES[@]}"; do
   # such as "continuous" or "nightly", where the tag never changes.
   if [[ $tag == "$have_tag" && $published == "$have_published" ]]; then
     say "  up to date ($tag)"
-    continue
+    return
   fi
 
   mapfile -t assets < <(release_appimage_assets <<<"$release")
-  ((${#assets[@]})) || { FAILED+=("$name: release $tag has no AppImage asset"); continue; }
+  ((${#assets[@]})) || { FAILED+=("$name: release $tag has no AppImage asset"); return; }
 
   selected=""
   for row in "${assets[@]}"; do
@@ -92,7 +124,7 @@ for entry in "${ENTRIES[@]}"; do
 
   if [[ -z $selected ]]; then
     FAILED+=("$name: no asset in $tag matches $asset_pattern")
-    continue
+    return
   fi
 
   new_asset=${selected%%$'\t'*}
@@ -101,29 +133,68 @@ for entry in "${ENTRIES[@]}"; do
   if ((CHECK_ONLY)); then
     news "$name: $have_tag -> $tag ($new_asset)"
     UPDATED+=("$name $tag")
-    continue
+    return
   fi
 
   news "Updating $name: $have_tag -> $tag"
-  work=$(mktemp -d)
-  if ! download_asset "$new_url" "$work/$new_asset"; then
-    rm -rf "$work"
-    FAILED+=("$name: download failed")
-    continue
+  tracking=(--repo "$repo" --release "$tag" --asset-glob "$(asset_glob "$new_asset")" --published "$published")
+  ((prerelease)) && tracking+=(--prerelease)
+  install_update "$name" "$tag" "$new_url" "$new_asset" "${tracking[@]}"
+}
+
+update_from_url() {
+  local entry="$1" name="$2" url="$3"
+  local have_stamp have_asset probe new_asset stamp
+
+  have_stamp=$(desktop_key X-AppImage-Url-Stamp "$entry")
+  have_asset=$(desktop_key X-AppImage-Asset "$entry")
+
+  say "Checking $name ($url)..."
+  if ! probe=$(url_probe "$url"); then
+    FAILED+=("$name: could not reach $url")
+    return
+  fi
+  new_asset=${probe%%$'\t'*}
+  stamp=${probe#*$'\t'}
+
+  if [[ -z $stamp ]]; then
+    FAILED+=("$name: $url no longer sends ETag, Last-Modified, or size")
+    return
   fi
 
-  if omarchy-install-appimage "$work/$new_asset" --keep-source --quiet \
-    --repo "$repo" --release "$tag" --asset "$new_asset" \
-    --asset-glob "$(asset_glob "$new_asset")" --published "$published"; then
-    UPDATED+=("$name $tag")
-  else
-    FAILED+=("$name: install failed")
+  # A "latest" link that redirects to a versioned file changes name; a rolling
+  # file behind a fixed name changes validator.
+  if [[ $stamp == "$have_stamp" && $new_asset == "$have_asset" ]]; then
+    say "  up to date ($new_asset)"
+    return
   fi
-  rm -rf "$work"
+
+  if ((CHECK_ONLY)); then
+    news "$name: new build at $url ($new_asset)"
+    UPDATED+=("$name $new_asset")
+    return
+  fi
+
+  news "Updating $name from $url"
+  install_update "$name" "$new_asset" "$url" "$new_asset" --url "$url" --url-stamp "$stamp"
+}
+
+for entry in "${ENTRIES[@]}"; do
+  repo=$(desktop_key X-AppImage-Repo "$entry")
+  url=$(desktop_key X-AppImage-Url "$entry")
+  [[ -n $repo || -n $url ]] || continue
+  ((TRACKED++))
+
+  name=$(desktop_key Name "$entry")
+  if [[ -n $repo ]]; then
+    update_from_github "$entry" "$name" "$repo"
+  else
+    update_from_url "$entry" "$name" "$url"
+  fi
 done
 
 if ((TRACKED == 0)); then
-  say "No AppImages are tracked from GitHub releases."
+  say "No AppImages are tracked from GitHub releases or download URLs."
   exit 0
 fi
 

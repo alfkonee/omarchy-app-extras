@@ -1,0 +1,56 @@
+#!/bin/bash
+
+# Install an AppImage from a direct download URL and remember the URL, so
+# omarchy-update-appimages can re-check it for a new build. Changes are detected
+# from the server's ETag, Last-Modified, or size, plus the served file name, so
+# the URL should be a stable "latest" link rather than a one-off versioned one.
+#
+# Usage: omarchy-install-appimage-url [url]
+
+set -euo pipefail
+
+source "$HOME/.local/lib/omarchy/appimage.sh"
+
+URL="${1-}"
+
+case $URL in
+-h | --help)
+  sed -n '3,8p' "$0" | sed 's/^# \?//'
+  exit 0
+  ;;
+esac
+
+if [[ -z $URL ]]; then
+  echo -e "\e[32mInstall an AppImage from a direct download URL.\e[0m\n"
+  URL=$(gum input --prompt "URL> " --placeholder "https://example.com/download/App-x86_64.AppImage")
+fi
+
+[[ $URL =~ ^https?:// ]] || { echo "Not an http(s) URL: $URL"; exit 1; }
+
+echo "Checking $URL..."
+PROBE=$(url_probe "$URL") || { echo "Could not reach $URL."; exit 1; }
+
+ASSET_NAME=${PROBE%%$'\t'*}
+STAMP=${PROBE#*$'\t'}
+
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+
+echo -e "\nDownloading \e[32m$ASSET_NAME\e[0m..."
+download_asset "$URL" "$WORK/$ASSET_NAME"
+
+INSTALL_ARGS=(--keep-source --asset "$ASSET_NAME")
+if [[ -n $STAMP ]]; then
+  INSTALL_ARGS+=(--url "$URL" --url-stamp "$STAMP")
+fi
+
+omarchy-install-appimage "$WORK/$ASSET_NAME" "${INSTALL_ARGS[@]}"
+
+if [[ -z $STAMP ]]; then
+  echo -e "\e[33mThe server sends no ETag, Last-Modified, or size for this URL, so new builds\e[0m"
+  echo -e "\e[33mcannot be detected. Installed without update tracking.\e[0m"
+  exit 0
+fi
+
+# Tracking an app is what makes the daily update check worth running.
+omarchy-appimage-watch enable --quiet
