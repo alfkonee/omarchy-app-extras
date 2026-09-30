@@ -2,8 +2,8 @@
 
 Flatpak and AppImage application support for [Omarchy](https://github.com/omacom/omarchy) 4.x:
 menu entries to install them, launcher registration that actually makes them
-show up in the app search selector, and GitHub-release auto-updates for
-AppImages.
+show up in the app search selector, and auto-updates for AppImages tracked
+from GitHub releases (optionally prereleases) or direct download URLs.
 
 Everything installs into your own home directory. Nothing under
 `/usr/share/omarchy` is touched, so `omarchy update` neither clobbers this nor
@@ -51,15 +51,17 @@ Into `~/.local/bin`:
 | `omarchy-install-flatpak-app` | Search Flathub with `gum`, user-install the pick, register the launcher |
 | `omarchy-remove-flatpak-app` | Pick an installed Flatpak, uninstall it, drop unused runtimes |
 | `omarchy-install-appimage` | Install an `.AppImage` into `~/Applications`, lift the bundled `.desktop` entry and the largest bundled icon out of the image, write `~/.local/share/applications/appimage-<slug>.desktop` |
-| `omarchy-install-appimage-github` | Install straight from a GitHub repo's latest release and record where it came from |
-| `omarchy-update-appimages` | Check every tracked AppImage for a newer release and reinstall the ones that moved |
+| `omarchy-install-appimage-github` | Install straight from a GitHub repo's latest release and record where it came from; `--prerelease` follows prereleases too |
+| `omarchy-install-appimage-url` | Install from a direct download URL and record it for re-checking |
+| `omarchy-update-appimages` | Check every tracked AppImage for a newer release or build and reinstall the ones that moved |
 | `omarchy-appimage-watch` | `enable`/`disable`/`status`/`run` the daily update timer |
 | `omarchy-remove-appimage` | Remove an AppImage, its launcher, and its icon |
 
 Also installed:
 
-- `~/.local/lib/omarchy/appimage.sh` — shared GitHub-release helpers (uses `gh`
-  when you are authenticated, anonymous `curl` otherwise).
+- `~/.local/lib/omarchy/appimage.sh` — shared release and download helpers
+  (GitHub lookups use `gh` when you are authenticated, anonymous `curl`
+  otherwise).
 - `~/.config/omarchy/hooks/post-update.d/20-flatpak-apps` — `flatpak update`,
   AppImage release check, and a launcher refresh after every `omarchy update`.
 - `~/.config/omarchy/hooks/post-boot.d/20-app-entries` — cache refresh and stale
@@ -84,10 +86,37 @@ the tag never changes. The next release's asset is matched with the
 version-agnostic glob (`Cursor-1.2.3-x86_64.AppImage` → `Cursor-*-x86_64.AppImage`),
 and the superseded binary is deleted after the new one installs.
 
+#### Prereleases
+
+By default an app follows the repo's published *latest* release, falling back
+to the newest prerelease only when the project ships nothing else. Install with
+`omarchy-install-appimage-github --prerelease owner/repo` (the menu asks) to
+follow whichever non-draft release — stable or prerelease — was published most
+recently. The choice is stored as `X-AppImage-Prerelease=true` and carried
+across updates; reinstall without the flag to go back to stable.
+
+#### Direct download URLs
+
+For apps not published on GitHub, `omarchy-install-appimage-url <url>` records
+the link instead of a repo:
+
+```
+X-AppImage-Url=https://example.com/download/latest/App-x86_64.AppImage
+X-AppImage-Asset=App-2.4.0-x86_64.AppImage
+X-AppImage-Url-Stamp=etag:"5f3a-61e2b1c0"
+```
+
+Each check sends a `HEAD` request (a one-byte ranged `GET` when the server
+refuses `HEAD`), follows redirects, and compares the final response's
+validator — `ETag`, else `Last-Modified`, else size — and the served file name
+(from `Content-Disposition` or the final URL) with the recorded ones. Either
+changing triggers a download and reinstall. Point it at a stable "latest" link;
+a URL whose server sends none of those headers is installed without tracking.
+
 `omarchy-appimage-watch enable` writes a systemd **user** timer: `OnCalendar=daily`,
 `RandomizedDelaySec=30m`, `Persistent=true`, so a run missed while the laptop was
 asleep is caught up at the next boot. It is enabled automatically the first time
-you install an AppImage from GitHub.
+you install a tracked AppImage (GitHub repo or download URL).
 
 ## Menu rows added
 
@@ -98,6 +127,7 @@ Merged into `~/.config/omarchy/extensions/omarchy-menu.jsonc`:
 - **Install > AppImage > Enable AppImage** — shown only while `fuse2` is absent
 - **Install > AppImage > AppImage File**
 - **Install > AppImage > From GitHub Repo**
+- **Install > AppImage > From Download URL**
 - **Install > AppImage > Auto-Update** — a toggle, checkmarked while the timer is enabled
 - **Update > AppImages** — shown only when something is tracked
 - **Remove > Flatpak App** — shown only when a Flatpak app is installed
@@ -109,8 +139,10 @@ Merged into `~/.config/omarchy/extensions/omarchy-menu.jsonc`:
 git clone https://github.com/alfkonee/omarchy-app-extras.git ~/Code/omarchy-app-extras && ~/Code/omarchy-app-extras/install.sh
 ```
 
-The installer backs up `omarchy-menu.jsonc` with a timestamp before merging, is a
-no-op on a second run, and finishes with `omarchy menu refresh`.
+The installer backs up `omarchy-menu.jsonc` with a timestamp before changing it.
+A re-run replaces the rows it merged earlier with the current packaged ones (so
+new rows appear after an update), leaves every other row alone, and is a no-op
+when nothing changed. It finishes with `omarchy menu refresh`.
 
 ## Uninstall
 

@@ -46,12 +46,41 @@ install_hooks() {
   echo "Installed hooks in $HOOKS_DIR"
 }
 
+# Rows this repo owns, keyed by id prefix (same set uninstall.sh strips).
+OWNED_ROWS='^[[:space:]]*"(install\.flatpak|install\.appimage|update\.appimage|remove\.flatpak|remove\.appimage)[."]'
+
+# A re-run replaces the rows merged last time with the packaged ones, so new or
+# changed rows reach an existing menu file; everything else stays untouched.
+refresh_menu() {
+  local refreshed
+  refreshed=$(mktemp)
+  OWNED="$OWNED_ROWS" awk -v marker="$MENU_MARKER" '
+    NR == FNR { block = block $0 "\n"; next }
+    index($0, marker) { printf "%s", block; header = 2; next }
+    header && $0 ~ /^[[:space:]]*\/\// { header--; next }
+    { header = 0 }
+    $0 ~ ENVIRON["OWNED"] { next }
+    { print }
+  ' <(menu_rows) "$MENU_FILE" >"$refreshed"
+
+  if cmp -s "$refreshed" "$MENU_FILE"; then
+    rm -f "$refreshed"
+    echo "Menu rows already current in $MENU_FILE"
+    return 0
+  fi
+
+  cp -a "$MENU_FILE" "$MENU_FILE.bak.$(date +%Y%m%d-%H%M%S)"
+  cat "$refreshed" >"$MENU_FILE"
+  rm -f "$refreshed"
+  echo "Refreshed menu rows in $MENU_FILE (backup alongside it)"
+}
+
 # Splice the rows in ahead of the extension file's closing brace. JSONC tolerates
 # the trailing comma the rows end with, which is what makes this safe to append.
 merge_menu() {
   if [[ -f $MENU_FILE ]] && grep -qF "$MENU_MARKER" "$MENU_FILE"; then
-    echo "Menu rows already present in $MENU_FILE"
-    return 0
+    refresh_menu
+    return
   fi
 
   mkdir -p "$(dirname "$MENU_FILE")"
@@ -101,7 +130,8 @@ Flatpak and AppImage support installed.
   Install > Flatpak > Enable Flatpak     one-time Flatpak + Flathub setup
   Install > Flatpak > Flathub App        search Flathub and install
   Install > AppImage > AppImage File     install a downloaded .AppImage
-  Install > AppImage > From GitHub Repo  install and track a release asset
+  Install > AppImage > From GitHub Repo  install and track a release asset (prereleases optional)
+  Install > AppImage > From Download URL install and track a direct download link
   Install > AppImage > Auto-Update       daily release check (systemd user timer)
   Update  > AppImages                    update tracked AppImages now
   Remove  > Flatpak App / AppImage       uninstall
